@@ -1,0 +1,201 @@
+Parameters:
+  GithubRepo:
+    Type: String
+    Default: HugoJF/eventlab-v2-frontend
+    Description: GitHub repository to be used as a source in CodeBuild (<user>/<repo> format)
+  GithubRepoBranch:
+    Type: String
+    Default: master
+    Description: What branch should be used
+  CodestarConnectionArn:
+    Type: String
+    Default: arn:aws:codestar-connections:us-east-1:123123123:connection/uuid
+    Description: ARN of GitHub CodeStar Connection
+  ProjectName:
+    Type: String
+    Default: eventlab-frontend
+    Description: CodeBuild project name
+  ArtifactStoreBucket:
+    Type: String
+    Default: codepipeline-us-east-2-312412412
+    Description: S3 Bucket name for CodePipeline artifacts
+  BackendEndpoint:
+    Type: String
+    Default: http://my-endpoint.com
+    Description: Backend endpoint (full URL without ending slash)
+
+Resources:
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupname: !Join ['-', [EventlabCodeBuildLogGroup, !Ref AWS::StackName]]
+      RetentionInDays: 7
+  
+  S3Website:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: PublicRead
+      BucketName: eventlab-public-website
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  S3WebsitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Website
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+            Resource: !Join ['', [!GetAtt S3Website.Arn, '/*']]
+
+  CBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [codebuild.amazonaws.com, codepipeline.amazonaws.com]
+            Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+        - PolicyName: cb-policies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+        - PolicyName: logs-policies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+        - PolicyName: s3-cb-policies
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow # https://stackoverflow.com/questions/48225778/aws-codebuild-fails-while-downloading-source-message-access-denied
+                Resource: !Join ['', ['arn:aws:s3:::codepipeline-', !Ref AWS::Region, '-*']]
+                Action: 
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+        - PolicyName: s3-public-website-policies
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow # https://stackoverflow.com/questions/48225778/aws-codebuild-fails-while-downloading-source-message-access-denied
+                Resource: !Join ['', [!GetAtt S3Website.Arn, '/*']]
+                Action: 
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+        - PolicyName: codestar-policies
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action: 
+                  - codestar-connections:GetIndividualAccessToken
+                  - codestar-connections:GetHost
+                  - codestar-connections:UseConnection
+                  - codestar-connections:StartOAuthHandshake
+                  - codestar-connections:GetInstallationUrl
+                  - codestar-connections:GetConnection
+                  - codestar-connections:PassConnection
+  CBProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CBRole
+    Properties:
+      Name: !Ref ProjectName
+      Description: Eventlab frontend code
+      ServiceRole: !Ref CBRole
+      Source:
+        Type: CODEPIPELINE
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        EnvironmentVariables:
+          - Name: DEPLOY_BUCKET
+            Value: !Ref S3Website
+          - Name: ENDPOINT
+            Value: !Ref BackendEndpoint
+      TimeoutInMinutes: 5
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CBRole
+    Properties:
+      RoleArn: !GetAtt CBRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactStoreBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: pull-source
+              OutputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: 1
+              Configuration:
+                ConnectionArn: !Ref CodestarConnectionArn
+                FullRepositoryId: !Ref GithubRepo
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+                BranchName: !Ref GithubRepoBranch
+                #DetectChanges: true
+
+        - Name: Build-and-deploy
+          Actions:
+            - Name: build-and-deploy
+              InputArtifacts: 
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref ProjectName
+
+        # - Name: Deploy
+        #   Actions:
+        #     - Name: deploy-to-s3
+        #       InputArtifacts: 
+        #         - Name: build
+        #       ActionTypeId:
+        #         Category: Deploy
+        #         Owner: AWS
+        #         Provider: S3
+        #         Version: 1
+        #       Configuration:
+        #         BucketName: !Ref S3Website
+        #         Extract: true
+
+Outputs:
+  WebsiteUrl:
+    Value: !GetAtt S3Website.WebsiteURL
+    Description: S3 Domain Name

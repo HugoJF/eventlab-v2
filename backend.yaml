@@ -1,0 +1,453 @@
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select a VPC that allows instances access to the Internet.
+  SubnetId:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select at two subnets in your selected VPC.
+  DBInstanceID:
+    Default: eventlabcfrds
+    Description: My database instance
+    Type: String
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: >-
+      Must begin with a letter and must not end with a hyphen or contain two
+      consecutive hyphens.
+  ProjectName:
+    Type: String
+    Default: eventlab-backend
+    Description: CodeBuild project name
+  GithubRepo:
+    Type: String
+    Default: HugoJF/eventlab-v2-backend
+    Description: GitHub repository to be used as a source in CodeBuild (<user>/<repo> format)
+  GithubRepoBranch:
+    Type: String
+    Default: master
+    Description: What branch should be used
+  CodestarConnectionArn:
+    Type: String
+    Default: arn:aws:codestar-connections:us-east-1:123123123:connection/uuid
+    Description: ARN of GitHub CodeStar Connection
+  ArtifactStoreBucket:
+    Type: String
+    Default: codepipeline-us-east-2-312412412
+    Description: S3 Bucket name for CodePipeline artifacts
+  DBName:
+    Default: eventlabcf
+    Description: My database
+    Type: String
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+  DBUsername:
+    Default: admin
+    Description: Database username
+    Type: String
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z0-9]+'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+  DBUserPassword:
+    Default: adminadmin
+    Description: Database user password
+    Type: String
+    MinLength: 8
+    MaxLength: 64
+    AllowedPattern: '[a-zA-Z0-9]+'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+Resources:
+  ECSExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+        - PolicyName: ecs-exec-ecr
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - ecr:*
+        - PolicyName: ecs-exec-logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+  CBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [codebuild.amazonaws.com, codepipeline.amazonaws.com]
+            Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+        - PolicyName: cp-iam-policies # This is used by CodePipeline to setup ECS execution role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !GetAtt ECSExecution.Arn
+                Action:
+                  - iam:PassRole
+        - PolicyName: cb-ecs-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - ecs:*
+        - PolicyName: cb-policies
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+        - PolicyName: cb-codestar-build-permissions # https://docs.aws.amazon.com/codepipeline/latest/userguide/troubleshooting.html#codebuild-role-connections
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*' # TODO: specify the connection ARN
+                Action:
+                  - codestar-connections:UseConnection
+        - PolicyName: cb-base-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+              - Effect: Allow # https://github.com/aws/aws-toolkit-azure-devops/issues/311#issuecomment-623871181
+                Resource: !Join ['', ['arn:aws:ecr:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':repository/eventlab']]
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:ListImages
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+              - Effect: Allow # https://stackoverflow.com/questions/48225778/aws-codebuild-fails-while-downloading-source-message-access-denied
+                Resource: !Join ['', ['arn:aws:s3:::codepipeline-', !Ref AWS::Region, '-*']]
+                Action: 
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: CBRole
+    Properties:
+      RoleArn: !GetAtt CBRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactStoreBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: pull-source
+              OutputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: 1
+              Configuration:
+                ConnectionArn: !Ref CodestarConnectionArn
+                FullRepositoryId: !Ref GithubRepo
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+                BranchName: !Ref GithubRepoBranch
+
+        - Name: Build-and-deploy
+          Actions:
+            - Name: build-and-deploy
+              InputArtifacts: 
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref ProjectName
+
+        - Name: Deploy
+          Actions:
+            - Name: deploy-to-ecs
+              InputArtifacts: 
+                - Name: BuildOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: 1
+              Configuration:
+                ClusterName: !Ref ECSCluster # This !Ref returns cluster name
+                ServiceName: !GetAtt ECSService.Name # AWS::ECS::Service !Ref returns Arn
+                FileName: imagedefinitions.json
+                DeploymentTimeout: 15
+
+  CBProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CBRole
+    Properties:
+      Name: !Ref ProjectName
+      Description: Image build from eventlab
+      ServiceRole: !Ref CBRole
+      Source:
+        Type: CODEPIPELINE
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: IMAGE_REPO_NAME
+            Value: eventlab
+          - Name: IMAGE_TAG
+            Value: latest
+          - Name: CONTAINER_NAME
+            Value: eventlabcf-container-definition # this value comes from TaskDefinition > ContainerDefinition > Name
+          - Name: DOCKER_USERNAME
+            Value: '{{resolve:secretsmanager:dockerhub:SecretString:username}}'
+          - Name: DOCKER_PASSWORD
+            Value: '{{resolve:secretsmanager:dockerhub:SecretString:password}}'
+      TimeoutInMinutes: 5
+      Cache:
+        Type: LOCAL
+        Modes: # You can specify one or more cache mode, 
+          - LOCAL_CUSTOM_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+                  
+  RDS:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete # Avoid slow deletions since this is not a production template
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceID
+      DBName: !Ref DBName
+      DBInstanceClass: db.t2.micro
+      AllocatedStorage: 20
+      BackupRetentionPeriod: 0 # Disable backups
+      Engine: MySQL
+      EngineVersion: 8.0.25
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBUserPassword
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: eventlabcf-cluster
+      CapacityProviders: [FARGATE]
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: eventlabcf-ecs-security-group
+      VpcId: !Ref VpcId
+
+  ECSSecurityGroupHTTPInbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ECSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      CidrIp: 0.0.0.0/0 
+
+  ECSSecurityGroupALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ECSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 31000
+      ToPort: 61000
+      SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  CloudwatchBuildLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupname: !Join ['-', [!Ref AWS::StackName, BuildLogs]]
+      RetentionInDays: 7
+
+  CloudwatchWebLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupname: !Join ['-', [!Ref AWS::StackName, WebLogs]]
+      RetentionInDays: 7
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: 
+      - ALBListener # https://stackoverflow.com/questions/53971873/the-target-group-does-not-have-an-associated-load-balancer
+      - RDS 
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      HealthCheckGracePeriodSeconds: 30
+      DesiredCount: 1
+      TaskDefinition: !Ref ECSTaskDefinition
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetId
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: eventlabcf-container-definition # TODO: use refs
+          ContainerPort: 3000
+          TargetGroupArn: !Ref ELBTargetGroup
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      TaskRoleArn: !GetAtt ECSExecution.Arn
+      ExecutionRoleArn: !GetAtt ECSExecution.Arn
+      ContainerDefinitions:
+        - Name: eventlabcf-container-definition
+          Image: 186669703643.dkr.ecr.us-east-2.amazonaws.com/eventlab:latest # TODO: improve this
+          HealthCheck:
+            Command: [ "CMD-SHELL", "curl -f http://localhost:3000/health || exit 1" ]
+            StartPeriod: 30
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchWebLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: eventlabcf
+          PortMappings:
+            - ContainerPort: 3000
+          Environment:
+            - Name: DB_HOST
+              Value: !GetAtt RDS.Endpoint.Address
+            - Name: DB_USERNAME
+              Value: !Ref DBUsername
+            - Name: DB_PASSWORD
+              Value: !Ref DBUserPassword
+            - Name: DB_DATABASE
+              Value: !Ref DBName
+
+  ELB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: eventlabcf-lb
+      Subnets: !Ref SubnetId
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ELBTargetGroup
+      LoadBalancerArn: !Ref ELB
+      Port: 80
+      Protocol: HTTP
+
+  ALBECSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: ALBListener
+    Properties:
+      Priority: 10
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref ELBTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref ALBListener
+
+  ELBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ELB
+    Properties:
+      Name: eventlabcf-elb-tg
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: 200-299
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: [sts:AssumeRole]
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 
+              - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+              - elasticloadbalancing:DeregisterTargets
+              - elasticloadbalancing:Describe
+              - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+              - elasticloadbalancing:RegisterTargets
+              - ec2:Describe*
+              - ec2:AuthorizeSecurityGroupIngress
+            Resource: '*'
+Outputs:
+  LBDNSName:
+    Description: Load balancer DNS
+    Value: !GetAtt ELB.DNSName
