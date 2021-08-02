@@ -144,7 +144,7 @@ Resources:
 
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
-    DependsOn: CBRole
+    DependsOn: [CBRole, CBProject] # Wait for CBProject to be built to avoid early fails (ResourceNotFound)
     Properties:
       RoleArn: !GetAtt CBRole.Arn
       ArtifactStore:
