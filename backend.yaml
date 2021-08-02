@@ -229,6 +229,7 @@ Resources:
       Name: !Ref ProjectName
       Description: Image build from eventlab
       ServiceRole: !Ref CBRole
+      ConcurrentBuildLimit: 1
       Source:
         Type: CODEPIPELINE
       Artifacts:

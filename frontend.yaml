@@ -127,6 +127,7 @@ Resources:
       Name: !Ref ProjectName
       Description: Eventlab frontend code
       ServiceRole: !Ref CBRole
+      ConcurrentBuildLimit: 1
       Source:
         Type: CODEPIPELINE
       Artifacts:
