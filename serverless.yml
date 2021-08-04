@@ -7,7 +7,7 @@ Parameters:
     Description: CodeBuild project name
   GithubRepo:
     Type: String
-    Default: HugoJF/eventlab-v2
+    Default: HugoJF/eventlab-v2-backend
     Description: GitHub repository to be used as a source in CodeBuild (<user>/<repo> format)
   GithubRepoBranch:
     Type: String
@@ -24,9 +24,9 @@ Parameters:
 Resources:
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
-    DependsOn: CPRole
+    DependsOn: [CPRole, CFRole]
     Properties:
-      RoleArn: !GetAtt CBRole.Arn
+      RoleArn: !GetAtt CPRole.Arn
       ArtifactStore:
         Type: S3
         Location: !Ref ArtifactStoreBucket
@@ -75,8 +75,8 @@ Resources:
               Configuration:
                 ActionMode: CREATE_UPDATE
                 StackName: eventlab-v2-serverless-deployment
-                Capabilities: [ CAPABILITY_IAM, CAPABILITY_NAMED_IAM ]
-                RoleArn: !Ref CFRole
+                Capabilities: 'CAPABILITY_IAM,CAPABILITY_NAMED_IAM'
+                RoleArn: !GetAtt CFRole.Arn
                 TemplatePath: BuildOutput::packaged.yml
 
   CFRole:
@@ -96,6 +96,7 @@ Resources:
         - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
         - arn:aws:iam::aws:policy/AmazonAPIGatewayAdministrator
         - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
 
   CPRole:
     Type: AWS::IAM::Role
@@ -108,14 +109,25 @@ Resources:
             Action: [ sts:AssumeRole ]
       Path: /
       Policies:
+        - PolicyName: cp-iam-policies # This is used by CodePipeline to setup ECS execution role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !GetAtt CFRole.Arn
+                Action:
+                  - iam:PassRole
         - PolicyName: cb-artifacts-policy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow # https://stackoverflow.com/questions/48225778/aws-codebuild-fails-while-downloading-source-message-access-denied
-                Resource: !Join [ '', [ 'arn:aws:s3:::codepipeline-', !Ref AWS::Region, '-*' ] ]
+                Resource:
+                  - !Join [ '', [ 'arn:aws:s3:::codepipeline-', !Ref AWS::Region, '-*' ] ]
+                  - arn:aws:s3:::aws-cloudformation-package-cli/*
                 Action:
                   - s3:PutObject
+                  - s3:CreateMultipartUpload
                   - s3:GetObject
                   - s3:GetObjectVersion
         - PolicyName: cb-policies
@@ -135,11 +147,21 @@ Resources:
                 Resource: !Ref CodestarConnectionArn
                 Action:
                   - codestar-connections:UseConnection
+        - PolicyName: cf-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: '*'
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
         - PolicyName: cb-logs-policy
           PolicyDocument:
             Statement:
               - Effect: Allow
-                Resource: '*'
+                Resource:
                   - !GetAtt PipelineLogsGroup.Arn
                   - !Join ['', [ !GetAtt PipelineLogsGroup.Arn, ':*' ]]
                 Action:
@@ -150,7 +172,7 @@ Resources:
   PipelineLogsGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupname: !Join ['-', [!Ref AWS::StackName, PipelineLogs]]
+      LogGroupname: !Join ['-', [!Ref AWS::StackName, PipelineLogs]] #TODO : wrong name
       RetentionInDays: 7
 
   CBProject:
@@ -160,8 +182,13 @@ Resources:
       Name: !Ref ProjectName
       Description: Package update CloudFormation template
       ServiceRole: !Ref CPRole
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Join ['-', [!Ref AWS::StackName, PipelineLogs]] #TODO: add as parameter
       Source:
         Type: CODEPIPELINE
+        BuildSpec: buildspec-serverless.yml
       Artifacts:
         Type: CODEPIPELINE
       Environment:
@@ -169,4 +196,4 @@ Resources:
         ComputeType: BUILD_GENERAL1_SMALL
         Image: aws/codebuild/standard:5.0
         PrivilegedMode: true
-      TimeoutInMinutes: 2
+      TimeoutInMinutes: 5

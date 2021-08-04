@@ -39,6 +39,7 @@ Resources:
       BucketName: eventlab-public-website
       WebsiteConfiguration:
         IndexDocument: index.html
+        ErrorDocument: index.html
 
   S3WebsitePolicy:
     Type: AWS::S3::BucketPolicy
